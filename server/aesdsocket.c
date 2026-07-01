@@ -8,166 +8,161 @@
 #include <netdb.h>
 #include <syslog.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <time.h>
  
 #define PORT 9000
 #define tmp_file "/var/tmp/aesdsocketdata"
+#define BUFF_SIZE 1024
  
- bool run_program = true;
- char *buff;
- int sockfd;
+bool run_program = true;
+int sockfd;
+pthread_mutex_t shared_file_mutex = PTHREAD_MUTEX_INITIALIZER;
  
 void cleanup() {
-
-    free(buff);//free buffer 
-    //remove tmp file
-    if (unlink(tmp_file) != 0) {
-		perror("Failed to remove file");
-    }
-    //close connections 
     close(sockfd);
+    unlink(tmp_file);
     closelog();
 }
  
- 
+// Signal handler
 void end_signal(int signum) {
     syslog(LOG_INFO, "Caught signal, exiting");
     run_program = false;
-    return ;
+}
+
+//Timer thread 
+void* timer_thread_func(void* arg) {
+    while(run_program) {
+        sleep(10);  // no immediate timestamp
+ 
+        if(!run_program) break;
+ 
+        time_t now = time(NULL);
+        struct tm tm_now;
+        localtime_r(&now, &tm_now);
+ 
+        char timestamp[100];
+        strftime(timestamp, sizeof(timestamp), "timestamp:%Y-%m-%d %H:%M:%S\n", &tm_now);
+ 
+        pthread_mutex_lock(&shared_file_mutex);
+        FILE *fp = fopen(tmp_file, "a");
+        if(fp) {
+            fputs(timestamp, fp);
+            fclose(fp);
+        }
+        pthread_mutex_unlock(&shared_file_mutex);
+    }
+    return NULL;
+}
+ 
+// Client thread 
+void* client_thread_func(void* arg) {
+    int clientfd = *((int*)arg);
+    free(arg);
+ 
+    char buffer[BUFF_SIZE];
+    ssize_t bytes_received;
+    FILE *fp;
+ 
+    while((bytes_received = recv(clientfd, buffer, BUFF_SIZE, 0)) > 0) {
+        pthread_mutex_lock(&shared_file_mutex);
+        fp = fopen(tmp_file, "a");
+        if(fp) {
+            fwrite(buffer, 1, bytes_received, fp);
+            fclose(fp);
+        }
+        pthread_mutex_unlock(&shared_file_mutex);
+ 
+        
+        if(memchr(buffer, '\n', bytes_received)) {
+            pthread_mutex_lock(&shared_file_mutex);
+            fp = fopen(tmp_file, "r");
+            if(fp) {
+                while(fgets(buffer, BUFF_SIZE, fp)) {
+                    send(clientfd, buffer, strlen(buffer), 0);
+                }
+                fclose(fp);
+            }
+            pthread_mutex_unlock(&shared_file_mutex);
+        }
+    }
+
+	syslog(LOG_INFO,"Closed connection" );
+ 
+    close(clientfd);
+    return NULL;
 }
  
 int main(int argc, char *argv[]) {
  
-    
-    openlog("aesdsocket", 0, LOG_USER);// Setup syslog 
-
+    openlog("aesdsocket", 0, LOG_USER);
  
-    //Setup signal handlers 
-    struct sigaction sig_handler ;
+    //signal handlers
+    struct sigaction sig_handler;
     memset(&sig_handler,0,sizeof(sig_handler));
     sig_handler.sa_handler = end_signal;
-    
-    if(sigaction(SIGINT,&sig_handler,NULL) !=0){
-        perror("Sigaction SIGINT Failed");
-        return -1;
-    }
-    
-    if(sigaction(SIGTERM, &sig_handler,NULL) !=0){
-       perror("Sigaction SIGTERM Failed");
-       return -1;
-    }
  
-    
-    int buff_size = 1024; // Dynamic Allocatation for buffer
-    buff = malloc(buff_size);
-    if (buff == NULL) {
-        return -1;
-    }
+    sigaction(SIGINT,&sig_handler,NULL);
+    sigaction(SIGTERM,&sig_handler,NULL);
  
-    // Create socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        return -1;
-    }
-    // Set socket options to allow reuse of address and port
+    if(sockfd < 0) { perror("socket"); return -1; }
+ 
     int optval = 1;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
-        return -1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+ 
+    struct sockaddr_in addr;
+    memset(&addr,0,sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+ 
+    if(bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind"); cleanup(); return -1;
     }
  
-	struct sockaddr_in addr;
-	memset(&addr,0, sizeof(addr));
-	addr.sin_family=AF_INET;
-	addr.sin_port=htons(PORT);
-	addr.sin_addr.s_addr=INADDR_ANY;
-	
-   // bind the socket to the address and port
-   
-	if(bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        cleanup();
-        return -1;
-    }
- 
-    if(argc>1 && strcmp(argv[1],"-d") == 0){
-        //enter daemon mode
+    // Daemon mode
+    if(argc>1 && strcmp(argv[1],"-d")==0){
         pid_t pid = fork();
-        //check if fork failed
-        if(pid == -1){
-            cleanup();
-            return -1;
+        if(pid < 0){ 
+        cleanup(); 
+        return -1; 
         }
-        else if(pid == 0){
-            //child process
-            int setsid_result = setsid();
-            if(setsid_result == -1){
-                cleanup();
-                return -1;
-            }
-            chdir("/");
-            close(STDIN_FILENO);
-            close(STDOUT_FILENO);
-            close(STDERR_FILENO);
-        }
-        else{
-            //parent process
-            //exit parent process
-            exit(0);
-        }
-    }
-
+        if(pid > 0) exit(0); // parent exits
  
-    // Listen for incoming connections
-    int result = listen(sockfd, 5);
-    if (result < 0) {
-        cleanup();
-        return -1;
+        setsid();
+        chdir("/");
+        close(STDIN_FILENO); 
+        close(STDOUT_FILENO); 
+        close(STDERR_FILENO);
     }
+ 
+    listen(sockfd, 5);
+ 
+    // Start timer thread
+    pthread_t timer_thread;
+    pthread_create(&timer_thread, NULL, timer_thread_func, NULL);
+    pthread_detach(timer_thread);
  
     while(run_program){
- 
-        // Accept a connection
         struct sockaddr client_addr;
         socklen_t client_addr_len = sizeof(client_addr);
-        int clientfd = accept(sockfd, &client_addr, &client_addr_len);
-        if (clientfd < 0) {
-        	if (run_program ==false){
-	        	break;
-			}		
-			continue;
+        int *clientfd = malloc(sizeof(int));
+        *clientfd = accept(sockfd, &client_addr, &client_addr_len);
+        if(*clientfd < 0){
+            free(clientfd);
+            if(!run_program) break;
+            continue;
         }
  
-        syslog(LOG_INFO,"Accepted connection from %s",client_addr.sa_data);
- 
-        //open aesdsocketdata file and write to it
-        FILE *transfered_data_file = fopen(tmp_file, "a+");
-        if (transfered_data_file == NULL) {
-            cleanup();
-            return -1;
-        }
-        ssize_t bytes_received = 0;
-        while((bytes_received = recv(clientfd, buff, buff_size, 0)) > 0) {
-            fwrite(buff, 1, bytes_received, transfered_data_file);
-             // Search for newline in the received chunk
-            if (memchr(buff, '\n', bytes_received)) {
-                break;
-            }
-        }
- 
-        fflush(transfered_data_file);
-        fseek(transfered_data_file, 0, SEEK_SET);
- 
-        memset(buff, 0, buff_size);
- 
-        while (fgets(buff, buff_size, transfered_data_file) != NULL) {
-            send(clientfd, buff, strlen(buff), 0);
-        }
-        fclose(transfered_data_file);
-
-        syslog(LOG_INFO, "Closing connection from %s", client_addr.sa_data);
-        close(clientfd);
- 
+        syslog(LOG_INFO,"Accepted connection from %s",client_addr.sa_data );
+        pthread_t tid;
+        pthread_create(&tid, NULL, client_thread_func, clientfd);
+        pthread_detach(tid);
     }
  
     cleanup();
- 
     return 0;
 }
