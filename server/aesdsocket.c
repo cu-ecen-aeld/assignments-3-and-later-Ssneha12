@@ -133,7 +133,10 @@ int main(int argc, char *argv[]) {
         if(pid > 0) exit(0); // parent exits
  
         setsid();
-        chdir("/");
+        if (chdir("/") != 0) {
+    		perror("chdir");
+    		return -1;
+		}
         close(STDIN_FILENO); 
         close(STDOUT_FILENO); 
         close(STDERR_FILENO);
