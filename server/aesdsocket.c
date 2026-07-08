@@ -27,7 +27,7 @@
 #endif
  
 bool run_program = true;
-int sockfetd;
+int socketfd;
 pthread_mutex_t shared_file_mutex = PTHREAD_MUTEX_INITIALIZER;
  
  
@@ -75,7 +75,7 @@ void* timer_thread_func(void* arg) {
 
  
 
-        pthread_mutex_lock(&file_mutex);
+        pthread_mutex_lock(&shared_file_mutex);
 
  
 
@@ -85,7 +85,7 @@ void* timer_thread_func(void* arg) {
             close(fd);
         }
 
-        pthread_mutex_unlock(&file_mutex);
+        pthread_mutex_unlock(&shared_file_mutex);
         
         for(int i = 0; i < 10 && run_program; i++) {
             sleep(1);
@@ -116,7 +116,7 @@ void* client_thread_func(void* arg) {
         if(memchr(buff, '\n', bytes_received)) break;
     }
 
-    pthread_mutex_lock(&file_mutex);
+    pthread_mutex_lock(&shared_file_mutex);
 
     int fd = open(FILE_PATH, O_RDWR);
     if(fd >= 0) {
@@ -130,7 +130,7 @@ void* client_thread_func(void* arg) {
         }
         close(fd);
     }
-    pthread_mutex_unlock(&file_mutex);
+    pthread_mutex_unlock(&shared_file_mutex);
 
  	free(full_data);
     close(clientfd);
