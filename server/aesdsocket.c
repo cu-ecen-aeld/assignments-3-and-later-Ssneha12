@@ -9,7 +9,7 @@
 #include <syslog.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <fnctl.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/queue.h>
 #include <time.h>
