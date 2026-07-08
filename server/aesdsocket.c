@@ -27,7 +27,7 @@
 #endif
  
 bool run_program = true;
-int sockfd;
+int sockfetd;
 pthread_mutex_t shared_file_mutex = PTHREAD_MUTEX_INITIALIZER;
  
  
