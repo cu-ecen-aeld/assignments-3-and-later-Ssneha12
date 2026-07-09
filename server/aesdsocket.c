@@ -63,7 +63,7 @@ void* client_thread_func(void* arg)
 	 struct thread_node *node = (struct thread_node*)arg;
 	 int clientfd = node->clientfd;
 
-	 char buffer[BUFFER_SIZE];
+	 char buffer[BUFF_SIZE];
 	 char *full_data = NULL;
 	 size_t total_size = 0;
 
